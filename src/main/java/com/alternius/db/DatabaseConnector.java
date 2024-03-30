@@ -13,7 +13,7 @@ import java.util.Map;
  */
 public class DatabaseConnector {
 
-	private Connection connection;
+	public Connection connection;
 
 	/**
 	 * Allows for connection to PostgreSQL database using the JDBC driver.
@@ -66,62 +66,6 @@ public class DatabaseConnector {
 	}
 
 	/**
-	 * Executes an SQL query on the connected database. Queries using this method
-	 * MUST return results, or an error will be encountered.
-	 * 
-	 * @param query SQL query string
-	 * @return ResultSet containing results from query
-	 * @throws SQLException
-	 */
-	public List<Map<String, Object>> executeQuery(String query) throws SQLException {
-		List<Map<String, Object>> resultList = new ArrayList<>();
-		try (PreparedStatement statement = connection.prepareStatement(query);
-				ResultSet rs = statement.executeQuery()) {
-			ResultSetMetaData metaData = rs.getMetaData();
-			int columnCount = metaData.getColumnCount();
-			while (rs.next()) {
-				Map<String, Object> row = new HashMap<>();
-				for (int i = 1; i <= columnCount; i++) {
-					row.put(metaData.getColumnName(i), rs.getObject(i));
-				}
-				resultList.add(row);
-			}
-		}
-		return resultList;
-	}
-	
-	/**
-	 * Executes an SQL query on the connected database. Queries using this method
-	 * MUST return results, or an error will be encountered.
-	 * 
-	 * Accepts parameters for prepared statement construction.
-	 * 
-	 * @param query SQL query string
-	 * @return ResultSet containing results from query
-	 * @throws SQLException
-	 */
-	public List<Map<String, Object>> executeQuery(String query, Object... params) throws SQLException {
-	    List<Map<String, Object>> resultList = new ArrayList<>();
-	    try (PreparedStatement pstmt = connection.prepareStatement(query)) {
-	        for (int i = 0; i < params.length; i++) {
-	            pstmt.setObject(i + 1, params[i]);
-	        }
-	        try (ResultSet rs = pstmt.executeQuery()) {
-	            ResultSetMetaData metaData = rs.getMetaData();
-	            int columnCount = metaData.getColumnCount();
-	            while (rs.next()) {
-	                Map<String, Object> row = new HashMap<>();
-	                for (int i = 1; i <= columnCount; i++) {
-	                    row.put(metaData.getColumnName(i), rs.getObject(i));
-	                }
-	                resultList.add(row);
-	            }
-	        }
-	    }
-	    return resultList;
-	}
-
-	/**
 	 * Executes an SQL update on the connected database. Queries using this method
 	 * will not return results. Use for INSERT, UPDATE, or DELETE.
 	 * 
@@ -152,22 +96,5 @@ public class DatabaseConnector {
 	        }
 	        return pstmt.executeUpdate();
 	    }
-	}
-
-	/**
-	 * Closes connection to database.
-	 * 
-	 * @throws SQLException
-	 */
-	public void closeConnection() throws SQLException {
-		connection.close();
-	}
-	
-	public void rollbackChanges() throws SQLException {
-		connection.rollback();
-	}
-	
-	public void commitChanges() throws SQLException {
-		connection.commit();
 	}
 }
