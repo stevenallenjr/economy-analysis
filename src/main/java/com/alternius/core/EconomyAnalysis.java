@@ -155,13 +155,13 @@ public class EconomyAnalysis {
 		String sumQuery = "SELECT "
 				+ "(SELECT SUM(sum_transfers) "
 				+ "FROM daily_group_transfer "
-				+ "WHERE destination_group_id = ?) "
-				+ "AND date <= ?"
+				+ "WHERE destination_group_id = ? "
+				+ "AND date <= ?) "
 				+ "- "
 				+ "(SELECT SUM(sum_transfers) "
 				+ "FROM daily_group_transfer "
-				+ "WHERE origin_group_id = ?) "
-				+ "AND date <= ?"
+				+ "WHERE origin_group_id = ? "
+				+ "AND date <= ?)"
 				+ "AS difference;";
 
 		try (PreparedStatement pstmt = dbConnector.connection.prepareStatement(sumQuery)) {
@@ -206,30 +206,34 @@ public class EconomyAnalysis {
 		// Delete anything past the 20th row
 		
 		// Set an OFFSET of 20 so that results start at the 20th row, if it exists
-		String transactionsQuery = "SELECT account, timestamp "
+		String transactionsQuery = "SELECT timestamp "
 				+ "FROM recent_transactions "
 				+ "WHERE account = ? "
-				+ "OFFSET 20;";
+				+ "ORDER BY timestamp ASC "
+				+ "OFFSET 20 "
+				+ "LIMIT 1;";
+		
+		Timestamp deletionStart = null;
+		
 		try (PreparedStatement pstmt = dbConnector.connection.prepareStatement(transactionsQuery)) {
 			pstmt.setLong(1, accountID);
-			
 			try (ResultSet rs = pstmt.executeQuery()) {
 				if (rs.next()) {
-					// Query to delete all rows past #20
-					String deleteQuery = "DELETE FROM recent_transactions "
-							+ "WHERE account = ? "
-							+ "AND timestamp >= ?;";
-					
 					// Get the timestamp of the 1st row (the 21st row total for the account) and delete all rows at and after this time
-					Timestamp deletionStart = rs.getTimestamp("timestamp");
-					
-					try (PreparedStatement deleteStmt = dbConnector.connection.prepareStatement(deleteQuery)) {
-						deleteStmt.setLong(1, accountID);
-						deleteStmt.setTimestamp(2, deletionStart);
-						
-						deleteStmt.executeUpdate();
-					}
+					deletionStart = rs.getTimestamp("timestamp");
 				}
+			}
+		}
+		
+		if (deletionStart != null) {
+			String deleteQuery = "DELETE FROM recent_transactions "
+					+ "WHERE account = ? "
+					+ "AND timestamp >= ?;";
+			try (PreparedStatement deleteStmt = dbConnector.connection.prepareStatement(deleteQuery)) {
+				deleteStmt.setLong(1, accountID);
+				deleteStmt.setTimestamp(2, deletionStart);
+				
+				deleteStmt.executeUpdate();
 			}
 		}
 	}
