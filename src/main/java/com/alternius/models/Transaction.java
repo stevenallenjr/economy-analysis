@@ -1,5 +1,6 @@
 package com.alternius.models;
 
+import java.sql.Timestamp;
 import java.time.LocalDate;
 
 /**
@@ -13,7 +14,7 @@ public class Transaction {
 	private double amount;
 	private long id;
 
-	private LocalDate date;
+	private Timestamp timestamp;
 
 	/**
 	 * Creates an instance of a Transaction.
@@ -24,12 +25,12 @@ public class Transaction {
 	 * @param recipient Account of recipient
 	 * @param date      date the transaction was completed
 	 */
-	public Transaction(long id, double amount, Account sender, Account recipient, LocalDate date) {
+	public Transaction(long id, double amount, Account sender, Account recipient, Timestamp date) {
 		this.id = id;
 		this.amount = amount;
 		this.sender = sender;
 		this.recipient = recipient;
-		this.date = date;
+		this.timestamp = date;
 	}
 
 	/**
@@ -73,8 +74,8 @@ public class Transaction {
 	 * 
 	 * @return LocalDate of transaction completion
 	 */
-	public LocalDate getDate() {
-		return date;
+	public Timestamp getTimestamp() {
+		return timestamp;
 	}
 
 	/**

@@ -1,11 +1,11 @@
 package com.alternius.core;
 
+import java.sql.Date;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.time.LocalDate;
-import java.util.HashMap;
-import java.util.LinkedList;
-import java.util.Map;
 
 import com.alternius.db.DatabaseConnector;
 import com.alternius.models.Transaction;
@@ -17,12 +17,6 @@ import com.alternius.models.Transaction;
 public class EconomyAnalysis {
 
 	private final DatabaseConnector dbConnector;
-
-	// Last 20 transactions for each account - wasn't sure if this was to be stored
-	// in memory or in a Postgres database with the other metrics.
-	// If I were to store it in a Postgres database, probably store it as a single
-	// column using jsonb?
-	private Map<Long, LinkedList<Transaction>> accountTransactions = new HashMap<>();
 
 	/**
 	 * Constructor for EconomyAnalysis
@@ -38,14 +32,26 @@ public class EconomyAnalysis {
 	 * database.
 	 * 
 	 * @param transaction transaction to be processed
+	 * @throws SQLException
 	 */
-	public void processTransaction(Transaction transaction) {
+	public void processTransaction(Transaction transaction) throws SQLException {
 		try {
 			updateGroupTransfers(transaction);
-			updateRecentTransactions(transaction);
 			updateTotalPerGroup(transaction);
+			insertOrUpdateTransaction(transaction, transaction.getSender().getId());
+			insertOrUpdateTransaction(transaction, transaction.getRecipient().getId());
+
+			// If everything was successful, commit the changes
+			dbConnector.connection.commit();
 		} catch (SQLException e) {
-			e.printStackTrace();
+			try {
+				// If there was an exception, roll back any changes made during this transaction
+				dbConnector.connection.rollback();
+			} catch (SQLException ex) {
+				e.addSuppressed(ex);
+			}
+
+			throw e;
 		}
 	}
 
@@ -61,32 +67,16 @@ public class EconomyAnalysis {
 		// Get sender ID, recipient ID, and date of transaction
 		long senderGroupId = transaction.getSender().getGroupId();
 		long recipientGroupId = transaction.getRecipient().getGroupId();
-		LocalDate transactionDate = transaction.getDate();
+		Timestamp transactionTimestamp = transaction.getTimestamp();
+		double transactionAmount = transaction.getAmount();
 
-		// Construct query to get sum and number of transfers between sender and
-		// recipient groups and date to check whether it exists
-		String query = "SELECT sum_transfers, num_transfers FROM daily_group_transfer WHERE origin_group_id = "
-				+ senderGroupId + " AND destination_group_id = " + recipientGroupId + " AND date = '" + transactionDate
-				+ "'";
+		String upsertQuery = "INSERT INTO daily_group_transfer (date, sum_transfers, num_transfers, origin_group_id, destination_group_id) "
+				+ "VALUES (?, ?, 1, ?, ?) "
+				+ "ON CONFLICT (origin_group_id, destination_group_id, date) "
+				+ "DO UPDATE SET " + "sum_transfers = daily_group_transfer.sum_transfers + EXCLUDED.sum_transfers, "
+				+ "num_transfers = daily_group_transfer.num_transfers + 1;";
 
-		ResultSet rs = dbConnector.executeQuery(query);
-		if (rs != null && rs.next()) {
-			// Record exists, update it
-			double sumTransfers = rs.getDouble("sum_transfers") + transaction.getAmount();
-			long numTransfers = rs.getLong("num_transfers") + 1;
-
-			String updateQuery = "UPDATE daily_group_transfer SET sum_transfers = " + sumTransfers
-					+ ", num_transfers = " + numTransfers + " WHERE origin_group_id = " + senderGroupId
-					+ " AND destination_group_id = " + recipientGroupId + " AND date = '" + transactionDate + "'";
-			dbConnector.executeUpdate(updateQuery);
-		} else {
-			// Record does not exist, insert a new one setting initial sum_transfers value
-			// to transaction amount and num_transfers to 1
-			String insertQuery = "INSERT INTO daily_group_transfer (date, sum_transfers, num_transfers, origin_group_id, destination_group_id) VALUES ('"
-					+ transactionDate + "', " + transaction.getAmount() + ", 1, " + senderGroupId + ", "
-					+ recipientGroupId + ")";
-			dbConnector.executeUpdate(insertQuery);
-		}
+		dbConnector.executeUpdate(upsertQuery, transactionTimestamp, transactionAmount, senderGroupId, recipientGroupId);
 	}
 
 	/**
@@ -106,7 +96,7 @@ public class EconomyAnalysis {
 	private void updateTotalPerGroup(Transaction transaction) throws SQLException {
 		long senderGroupId = transaction.getSender().getGroupId();
 		long recipientGroupId = transaction.getRecipient().getGroupId();
-		LocalDate transactionDate = transaction.getDate();
+		LocalDate transactionDate = transaction.getTimestamp().toLocalDateTime().toLocalDate();
 		double transactionAmount = transaction.getAmount();
 
 		// For sender, deduct the transaction amount from their total balance for the
@@ -129,61 +119,122 @@ public class EconomyAnalysis {
 	 */
 	private void updateTotalPerDayOrInsert(long groupId, LocalDate transactionDate, double amountToAdd)
 			throws SQLException {
-		// Construct query to get the balance of the given group on the given date
-		String query = "SELECT amount FROM total_by_group WHERE account_group_id = " + groupId + " AND date = '"
-				+ transactionDate + "'";
+		// Construct query to update the existing record (if it exists)
+		String updateQuery = "UPDATE total_by_group "
+				+ "SET amount = amount + ? "
+				+ "WHERE account_group_id = ? "
+				+ "AND date = ?;";
+		int rowsUpdated = dbConnector.executeUpdate(updateQuery, amountToAdd, groupId, transactionDate);
 
-		ResultSet rs = dbConnector.executeQuery(query);
-		if (rs != null && rs.next()) {
-			// Record exists for the date, update it
-			double amount = rs.getDouble("amount");
+		// If no rows were updated, the record does not exist
+		if (rowsUpdated == 0) {
+			double initialAmount = calculateInitialAmount(groupId, transactionDate);
 
-			String updateQuery = "UPDATE total_by_group SET amount = " + (amount + amountToAdd)
-					+ " WHERE account_group_id = " + groupId;
-			dbConnector.executeUpdate(updateQuery);
-		} else {
-			// Record does not exist for their total for the day, so calculate based on sum
-			// of received money minus sum of sent money all time
-			String sumQuery = "SELECT(SELECT SUM(sum_transfers) FROM daily_group_transfer WHERE destination_group_id = "
-					+ groupId + ")" + "-(SELECT SUM(sum_transfers) FROM daily_group_transfer WHERE origin_group_id = "
-					+ groupId + ") AS difference;";
-			rs = dbConnector.executeQuery(sumQuery);
-
-			if (rs != null && rs.next()) {
-				// Fetch difference (sum of received money - sum of sent money all time) and
-				// create new row in total_by_group using that as the initial number
-				double sum = rs.getDouble("difference");
-
-				String insertQuery = "INSERT INTO total_by_group (account_group_id, date, amount) VALUES (" + groupId
-						+ ", '" + transactionDate + "', " + sum + ")";
-				dbConnector.executeUpdate(insertQuery);
+			// Insert a new record with the calculated initial amount
+			String insertQuery = "INSERT INTO total_by_group (account_group_id, date, amount) "
+					+ "VALUES (?, ?, ?);";
+			try (PreparedStatement pstmt = dbConnector.connection.prepareStatement(insertQuery)) {
+				pstmt.setLong(1, groupId);
+				pstmt.setDate(2, Date.valueOf(transactionDate));
+				pstmt.setDouble(3, initialAmount + amountToAdd);
+				
+				pstmt.executeUpdate();
 			}
 		}
 	}
 
 	/**
+	 * Calculates the initial daily balance for a group.
+	 * 
+	 * @param groupId ID of the group to be calculated for
+	 * @return initial amount to be assigned to the group
+	 * @throws SQLException
+	 */
+	private double calculateInitialAmount(long groupId, LocalDate transactionDate) throws SQLException {
+		double difference = 0;
+		String sumQuery = "SELECT "
+				+ "(SELECT SUM(sum_transfers) "
+				+ "FROM daily_group_transfer "
+				+ "WHERE destination_group_id = ? "
+				+ "AND date <= ?) "
+				+ "- "
+				+ "(SELECT SUM(sum_transfers) "
+				+ "FROM daily_group_transfer "
+				+ "WHERE origin_group_id = ? "
+				+ "AND date <= ?)"
+				+ "AS difference;";
+
+		try (PreparedStatement pstmt = dbConnector.connection.prepareStatement(sumQuery)) {
+			pstmt.setLong(1, groupId);
+			pstmt.setDate(2, Date.valueOf(transactionDate));
+			pstmt.setLong(3, groupId);
+			pstmt.setDate(4, Date.valueOf(transactionDate));
+
+			try (ResultSet rs = pstmt.executeQuery()) {
+				if (rs.next()) {
+					difference = rs.getDouble("difference");
+				}
+			}
+		}
+		return difference;
+	}
+
+	/**
 	 * Updates the accountTransactions map to store the 20 most recent transactions
-	 * for each user. Adds the transaction and removes the oldest if list size > 20.
+	 * for each user. Adds the transaction to JSON and removes the oldest if size >
+	 * 20.
 	 * 
 	 * @param transaction transaction to be processed
 	 */
-	private void updateRecentTransactions(Transaction transaction) {
-		// Fetches the transactions list for the sender from the accountTransactions
-		// map, or creates it and maps it to the account ID if it does not exist
-		LinkedList<Transaction> senderTransactions = accountTransactions
-				.computeIfAbsent(transaction.getSender().getId(), id -> new LinkedList<>());
-		if (senderTransactions.size() >= 20) {
-			// Remove the oldest transaction if the list already has 20 transactions
-			senderTransactions.poll();
+	public void insertOrUpdateTransaction(Transaction transaction, long accountID) throws SQLException {
+		long senderID = transaction.getSender().getId();
+		long recipientID = transaction.getRecipient().getId();
+		
+		String insertQuery = "INSERT INTO recent_transactions (account, timestamp, data) "
+				+ "VALUES (?, ?, jsonb_build_object('id', ?, 'amount', ?, 'other_account', ?, 'is_sender', ?));";
+		try (PreparedStatement pstmt = dbConnector.connection.prepareStatement(insertQuery)) {
+			pstmt.setLong(1, accountID);
+			pstmt.setTimestamp(2, transaction.getTimestamp());
+			pstmt.setLong(3, transaction.getId());
+			pstmt.setDouble(4, transaction.getAmount());
+			pstmt.setDouble(5, accountID == senderID ? senderID : recipientID);
+			pstmt.setBoolean(6, accountID == senderID);
+			
+			pstmt.executeUpdate();
 		}
-		senderTransactions.add(transaction);
-
-		// Repeats the logic above for the recipient
-		LinkedList<Transaction> recipientTransactions = accountTransactions
-				.computeIfAbsent(transaction.getRecipient().getId(), id -> new LinkedList<>());
-		if (recipientTransactions.size() >= 20) {
-			recipientTransactions.poll();
+		
+		// Delete anything past the 20th row
+		
+		// Set an OFFSET of 20 so that results start at the 20th row, if it exists
+		String transactionsQuery = "SELECT timestamp "
+				+ "FROM recent_transactions "
+				+ "WHERE account = ? "
+				+ "ORDER BY timestamp ASC "
+				+ "OFFSET 20 "
+				+ "LIMIT 1;";
+		
+		Timestamp deletionStart = null;
+		
+		try (PreparedStatement pstmt = dbConnector.connection.prepareStatement(transactionsQuery)) {
+			pstmt.setLong(1, accountID);
+			try (ResultSet rs = pstmt.executeQuery()) {
+				if (rs.next()) {
+					// Get the timestamp of the 1st row (the 21st row total for the account) and delete all rows at and after this time
+					deletionStart = rs.getTimestamp("timestamp");
+				}
+			}
 		}
-		recipientTransactions.add(transaction);
+		
+		if (deletionStart != null) {
+			String deleteQuery = "DELETE FROM recent_transactions "
+					+ "WHERE account = ? "
+					+ "AND timestamp >= ?;";
+			try (PreparedStatement deleteStmt = dbConnector.connection.prepareStatement(deleteQuery)) {
+				deleteStmt.setLong(1, accountID);
+				deleteStmt.setTimestamp(2, deletionStart);
+				
+				deleteStmt.executeUpdate();
+			}
+		}
 	}
 }

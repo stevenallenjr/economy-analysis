@@ -1,6 +1,10 @@
 package com.alternius.db;
 
 import java.sql.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Utility class to connect to PostgreSQL database using JDBC driver. Did not
@@ -9,7 +13,7 @@ import java.sql.*;
  */
 public class DatabaseConnector {
 
-	private Connection connection;
+	public Connection connection;
 
 	/**
 	 * Allows for connection to PostgreSQL database using the JDBC driver.
@@ -29,6 +33,7 @@ public class DatabaseConnector {
 
 		// Open connection to database
 		connection = initializeConnection(host, port, user, password, database);
+		connection.setAutoCommit(false);
 	}
 
 	/**
@@ -61,41 +66,35 @@ public class DatabaseConnector {
 	}
 
 	/**
-	 * Executes an SQL query on the connected database. Queries using this method
-	 * MUST return results, or an error will be encountered.
-	 * 
-	 * @param query SQL query string
-	 * @return ResultSet containing results from query
-	 * @throws SQLException
-	 */
-	public ResultSet executeQuery(String query) throws SQLException {
-		if (connection == null)
-			// Lazy error handling, verifies a connection exists before an SQLException gets
-			// thrown
-			return null;
-
-		Statement statement = connection.createStatement();
-		return statement.executeQuery(query);
-	}
-
-	/**
-	 * Executes an SQL query on the connected database. Queries using this method
-	 * will not return results. Use for INSERT or UPDATE.
+	 * Executes an SQL update on the connected database. Queries using this method
+	 * will not return results. Use for INSERT, UPDATE, or DELETE.
 	 * 
 	 * @param sql SQL query string
+	 * @return int number of rows affected.
 	 * @throws SQLException
 	 */
-	public void executeUpdate(String sql) throws SQLException {
-		Statement statement = connection.createStatement();
-		statement.executeUpdate(sql);
+	public int executeUpdate(String sql) throws SQLException {
+		try (PreparedStatement statement = connection.prepareStatement(sql)) {
+			return statement.executeUpdate();
+		}
 	}
-
+	
 	/**
-	 * Closes connection to database.
+	 * Executes an SQL update on the connected database. Queries using this method
+	 * will not return results. Use for INSERT, UPDATE, or DELETE.
 	 * 
+	 * Accepts parameters for prepared statement construction.
+	 * 
+	 * @param sql SQL query string
+	 * @return int number of rows affected.
 	 * @throws SQLException
 	 */
-	public void closeConnection() throws SQLException {
-		connection.close();
+	public int executeUpdate(String sql, Object... params) throws SQLException {
+	    try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
+	        for (int i = 0; i < params.length; i++) {
+	            pstmt.setObject(i + 1, params[i]);
+	        }
+	        return pstmt.executeUpdate();
+	    }
 	}
 }
